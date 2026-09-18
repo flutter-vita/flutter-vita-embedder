@@ -33,7 +33,9 @@
 #include <psp2/appmgr.h>
 #include <psp2/kernel/processmgr.h>
 #include <psp2/common_dialog.h>
+#include <psp2/ctrl.h>
 #include <psp2/power.h>
+#include <psp2/shellutil.h>
 
 #include <atomic>
 
@@ -60,6 +62,8 @@
 #include <cstdarg>
 #include <cstdio>
 #include <cstdlib>
+#include <string>
+#include <vector>
 #include <cstring>
 #include <mutex>
 
@@ -69,6 +73,7 @@
 #include "embedder_software_frame_damage.h"
 #include "engine_version.h"
 // Ours.
+#include "embedder_version.h"
 #include "flutter_vita_gl.h"
 #include "vita_hud_font.h"
 
@@ -175,6 +180,16 @@ __attribute__((weak)) int flutter_vita_watchdog = 1;
 // thing a symbol meant to be overridden must not have.
 extern "C" {
 __attribute__((weak)) int flutter_vita_debug_overlay = 1;
+}
+
+// 1 in a release build (templates/vita-app/release.c defines it beside the
+// dev-server stubs), 0 otherwise. A release build has no strip and no
+// handoff whatever the overlay knob says: main() zeroes the knob when this
+// is set, so a package that defines its own default (flutter_vita's C half
+// says 2, hidden until the chord) never collides with release.c over one
+// symbol.
+extern "C" {
+__attribute__((weak)) int flutter_vita_release = 0;
 }
 
 // Force the CPU path regardless of any switch file.
@@ -1091,13 +1106,19 @@ bool InitGxmSurfaces() {
 // about it -- Scaffold subtracts it, and a scrollable uses it to bring the
 // focused field above the keyboard. Without this the keyboard simply covers
 // the field being typed into and nothing moves out of the way.
+// The layout density the app asked for (flutter_vita's `pixelRatio`). 1.0
+// gives the framework 960x544 logical pixels; 1.5 gives it 640x363, the size
+// of a phone, and every phone layout fits. Physical pixels and pointer
+// coordinates never change; only what the framework divides them by.
+double g_pixel_ratio = 1.0;
+
 void SendWindowMetrics(FlutterEngine engine) {
   if (engine == nullptr) return;
   FlutterWindowMetricsEvent metrics = {};
   metrics.struct_size = sizeof(FlutterWindowMetricsEvent);
   metrics.width = static_cast<size_t>(kWidth * g_surface_scale);
   metrics.height = static_cast<size_t>(kHeight * g_surface_scale);
-  metrics.pixel_ratio = g_surface_scale;
+  metrics.pixel_ratio = g_surface_scale * g_pixel_ratio;
   // libime reports the rect in display pixels. The framework wants physical
   // pixels of *this surface*, which is the same number unless we are rastering
   // at half resolution -- in which case the surface is half the size and so is
@@ -1362,6 +1383,40 @@ void HudBlit(void* base, int stride, int width, int height) {
   }
 }
 
+// The pad's cursor (flutter_vita's `pad: cursor`): an arrow the left stick
+// moves and X presses, blended over the finished frame the same way as the
+// strip, so it is above everything the app draws and costs one small blit.
+// 11x18, '#' white, 'o' black outline, '.' clear.
+constexpr int kCursorW = 11, kCursorH = 18;
+const char* const kCursorRows[kCursorH] = {
+    "o..........", "oo.........", "o#o........", "o##o.......",
+    "o###o......", "o####o.....", "o#####o....", "o######o...",
+    "o#######o..", "o########o.", "o#####ooooo", "o##o##o....",
+    "o#o.o##o...", "oo..o##o...", "o....o##o..", ".....o##o..",
+    "......oo...", "...........",
+};
+std::atomic<bool> g_cursor_on{false};
+std::atomic<int> g_cursor_px{kWidth / 2};   // display pixels, for the blit
+std::atomic<int> g_cursor_py{kHeight / 2};
+
+void CursorBlit(void* base, int stride, int width, int height) {
+  if (!g_cursor_on.load(std::memory_order_relaxed)) return;
+  const int cx = g_cursor_px.load(std::memory_order_relaxed);
+  const int cy = g_cursor_py.load(std::memory_order_relaxed);
+  uint32_t* fb = static_cast<uint32_t*>(base);
+  for (int row = 0; row < kCursorH; row++) {
+    const int y = cy + row;
+    if (y < 0 || y >= height) continue;
+    for (int col = 0; col < kCursorW; col++) {
+      const int x = cx + col;
+      if (x < 0 || x >= width) continue;
+      const char c = kCursorRows[row][col];
+      if (c == '#') fb[static_cast<size_t>(y) * stride + x] = 0xFFFFFFFFu;
+      else if (c == 'o') fb[static_cast<size_t>(y) * stride + x] = 0xFF000000u;
+    }
+  }
+}
+
 // A second, shorter accumulation window, for the HUD only.
 //
 // Deliberately not the same window as the FRAMES line. Sixty frames is the
@@ -1610,8 +1665,10 @@ void HudPaint(void* base) {
 // flutter_vita_gl_set_frame_hook). The text is composed on the raster thread
 // by HudUpdate; this copies the box it published last.
 void HudFrameHook(void* /* ctx */, void* pixels, int width, int height, int stride) {
-  if (flutter_vita_debug_overlay == 0 || !g_hud_on) return;
-  HudBlit(pixels, stride, width, height);
+  if (flutter_vita_debug_overlay != 0 && g_hud_on) {
+    HudBlit(pixels, stride, width, height);
+  }
+  CursorBlit(pixels, stride, width, height);
 }
 
 // Per-present bookkeeping, shared by both backends.
@@ -2727,6 +2784,8 @@ bool PresentSurface(void* /* user_data */,
     }
     g_win_hud_us += sceKernelGetSystemTimeWide() - hud_start;
   }
+  // The pad's cursor, over whatever the blit and the strip left.
+  CursorBlit(g_display.base, kPitch, kWidth, kHeight);
 
   // The next frame is whole until the rasterizer says otherwise. Without this
   // a frame the observer never reported would silently reuse the last rect.
@@ -2809,6 +2868,10 @@ bool InitGl() {
   if (flutter_vita_debug_overlay != 0) {
     HudTitle(flutter_vita_gl_backend());
     HudCompose();  // the pre-filled text, so the first frames carry the strip
+  }
+  // Installed whatever the overlay knob says: the hook also draws the pad's
+  // cursor, and returns at once when neither is up.
+  {
     flutter_vita_gl_set_frame_hook(HudFrameHook, nullptr);
   }
   return true;
@@ -3441,6 +3504,502 @@ void SendTextInputMethod(const char* json) {
   FlutterEngineSendPlatformMessage(g_engine, &out);
 }
 
+
+// ===========================================================================
+// What the app configures at run time: the vita/config channel.
+//
+// flutter_vita, the pub package, sends one `configure` call at start-up and
+// setters later; every key is optional. This is the platform side of that
+// package's API. What a build decides (the dev server, the title id, the
+// heap) is not here: those are the pubspec and --release.
+// ===========================================================================
+
+// Where the app goes when it asks to leave (SystemNavigator.pop, or
+// System.exitApplication). Auto: the receiver in a debug build, the LiveArea
+// in a release one.
+enum ExitMode { kExitAuto, kExitHandoff, kExitQuit, kExitIgnore };
+ExitMode g_exit_mode = kExitAuto;
+
+// The app's say (flutter_vita's `watchdog`), over the build's and the card's.
+int g_watchdog_override = -1;
+
+void RequestExit() {
+  ExitMode mode = g_exit_mode;
+  if (mode == kExitAuto) mode = flutter_vita_release ? kExitQuit : kExitHandoff;
+  if (mode == kExitIgnore) {
+    VLog("flutter-vita: exit asked, ignored (onExit: ignore)\n");
+    return;
+  }
+  if (mode == kExitHandoff && !flutter_vita_release) {
+    // The dev server's watcher (devserver.c) picks the file up within half a
+    // second, releases the GPU and hands the console to the receiver.
+    const SceUID fd = sceIoOpen("ux0:data/flutter-vita/handoff.request",
+                                SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+    if (fd >= 0) {
+      sceIoClose(fd);
+      VLog("flutter-vita: exit asked, handing off to the receiver\n");
+      return;
+    }
+    VLog("flutter-vita: handoff request failed (0x%08X), leaving instead\n",
+         static_cast<unsigned>(fd));
+  }
+  VLog("flutter-vita: exit asked, leaving\n");
+  flutter_vita_gpu_shutdown();
+  flutter_vita_log_flush();
+  sceKernelExitProcess(0);
+}
+
+// Channels the app answers in Dart: a message on one of these is wrapped and
+// sent up on vita/bounce, and Dart's reply comes back on the original handle.
+// This is how a plugin with no Vita side gets one without a C half
+// (flutter_vita's fallbacks: share, url_launcher, image_picker).
+constexpr int kMaxBounce = 16;
+char g_bounce[kMaxBounce][64];
+int g_bounce_count = 0;
+
+bool IsBounced(const char* channel) {
+  if (channel == nullptr) return false;
+  for (int i = 0; i < g_bounce_count; i++) {
+    if (std::strcmp(g_bounce[i], channel) == 0) return true;
+  }
+  return false;
+}
+
+void BounceReply(const uint8_t* data, size_t size, void* user_data) {
+  if (g_engine == nullptr) return;
+  FlutterEngineSendPlatformMessageResponse(
+      g_engine,
+      static_cast<const FlutterPlatformMessageResponseHandle*>(user_data),
+      data, size);
+}
+
+// The frame is one byte of channel-name length, the name, then the message
+// as it came, codec and all; Dart decodes the inner bytes with the plugin's
+// own codec. The engine copies the frame, so it can go out of scope here.
+// False when there is nothing Dart could answer (no response handle) or the
+// send failed; the caller then handles the message itself.
+bool BounceToDart(const FlutterPlatformMessage* message) {
+  if (g_engine == nullptr || message->response_handle == nullptr) return false;
+  const size_t name_len = std::strlen(message->channel);
+  if (name_len > 255) return false;
+  std::vector<uint8_t> frame(1 + name_len + message->message_size);
+  frame[0] = static_cast<uint8_t>(name_len);
+  std::memcpy(frame.data() + 1, message->channel, name_len);
+  if (message->message_size != 0) {
+    std::memcpy(frame.data() + 1 + name_len, message->message,
+                message->message_size);
+  }
+
+  FlutterPlatformMessageResponseHandle* handle = nullptr;
+  if (FlutterPlatformMessageCreateResponseHandle(
+          g_engine, BounceReply,
+          const_cast<FlutterPlatformMessageResponseHandle*>(
+              message->response_handle),
+          &handle) != kSuccess) {
+    return false;
+  }
+  FlutterPlatformMessage out = {};
+  out.struct_size = sizeof(FlutterPlatformMessage);
+  out.channel = "vita/bounce";
+  out.message = frame.data();
+  out.message_size = frame.size();
+  out.response_handle = handle;
+  const FlutterEngineResult r = FlutterEngineSendPlatformMessage(g_engine, &out);
+  FlutterPlatformMessageReleaseResponseHandle(g_engine, handle);
+  return r == kSuccess;
+}
+
+// The clipboard is this process: the console has none the app could reach.
+std::string g_clipboard;
+
+// 333/166/111/111 is the console's default profile; 444/222/222/166 is the
+// most user mode may ask for (500 needs the kernel). More frames, less
+// battery, and the debug strip's cores column shows the difference.
+void SetCpuClock(bool high) {
+  scePowerSetArmClockFrequency(high ? 444 : 333);
+  scePowerSetBusClockFrequency(high ? 222 : 166);
+  scePowerSetGpuClockFrequency(high ? 222 : 111);
+  scePowerSetGpuXbarClockFrequency(high ? 166 : 111);
+  VLog("flutter-vita: clocks arm %d bus %d gpu %d xbar %d\n",
+       scePowerGetArmClockFrequency(), scePowerGetBusClockFrequency(),
+       scePowerGetGpuClockFrequency(), scePowerGetGpuXbarClockFrequency());
+}
+
+// The PS button: the shell's, unless the app locks it (a kiosk, a game). The
+// lock is per process and falls with it, and the dev server's L+R+START
+// still hands off, so a locked app is never a stuck console.
+bool g_ps_locked = false;
+void SetPsButtonLocked(bool locked) {
+  static bool inited = false;
+  if (!inited) {
+    sceShellUtilInitEvents(0);
+    inited = true;
+  }
+  if (locked == g_ps_locked) return;
+  const int r = locked ? sceShellUtilLock(SCE_SHELL_UTIL_LOCK_TYPE_PS_BTN)
+                       : sceShellUtilUnlock(SCE_SHELL_UTIL_LOCK_TYPE_PS_BTN);
+  if (r >= 0) g_ps_locked = locked;
+  VLog("flutter-vita: PS button %s -> 0x%08X\n", locked ? "locked" : "unlocked",
+       static_cast<unsigned>(r));
+}
+
+// The strip: 0 never, 1 from the first frame, 2 hidden until L+R+SELECT.
+void SetStripMode(int mode) {
+  if (flutter_vita_release) return;
+  if (mode < 0 || mode > 2) return;
+  flutter_vita_debug_overlay = mode;
+  SetOverlay(mode == 1 ? 1 : 0);
+}
+
+// --- the pad as a pointer -------------------------------------------------
+//
+// `pad: cursor`. The left stick and the D-pad move the arrow CursorBlit draws,
+// X presses. The events are a mouse (device 1): the framework then gives
+// hover effects and a press the same as a click. The D-pad in `pad: focus`
+// mode is Dart's business (flutter_vita moves the focus itself) and never
+// reaches here.
+double g_cursor_x = kWidth / 2.0, g_cursor_y = kHeight / 2.0;
+
+void SendMouse(FlutterEngine engine, FlutterPointerPhase phase, int device,
+               double x, double y, int64_t buttons,
+               FlutterPointerSignalKind signal = kFlutterPointerSignalKindNone,
+               double sdx = 0, double sdy = 0) {
+  FlutterPointerEvent e = {};
+  e.struct_size = sizeof(FlutterPointerEvent);
+  e.phase = phase;
+  e.timestamp = static_cast<size_t>(FlutterEngineGetCurrentTime() / 1000);
+  e.x = x;
+  e.y = y;
+  e.device_kind = kFlutterPointerDeviceKindMouse;
+  e.device = device;
+  e.buttons = buttons;
+  e.signal_kind = signal;
+  e.scroll_delta_x = sdx;
+  e.scroll_delta_y = sdy;
+  FlutterEngineSendPointerEvent(engine, &e, 1);
+}
+
+void PumpPad(FlutterEngine engine) {
+  if (!g_cursor_on.load(std::memory_order_relaxed)) return;
+  SceCtrlData pad = {};
+  if (sceCtrlPeekBufferPositive(0, &pad, 1) < 0) return;
+
+  static bool added = false;
+  static bool pressed = false;
+  // Stick: a dead zone, then a square curve so a small tilt is precise and a
+  // full one crosses the panel in about a second (14 px a frame at 60 Hz).
+  auto vel = [](int v) {
+    const int dz = 24;
+    if (v > -dz && v < dz) return 0.0;
+    const double n = (std::abs(v) - dz) / (127.0 - dz);
+    return (v < 0 ? -1.0 : 1.0) * n * n * 14.0;
+  };
+  double x = g_cursor_x + vel(static_cast<int>(pad.lx) - 128);
+  double y = g_cursor_y + vel(static_cast<int>(pad.ly) - 128);
+  if (pad.buttons & SCE_CTRL_LEFT) x -= 4;
+  if (pad.buttons & SCE_CTRL_RIGHT) x += 4;
+  if (pad.buttons & SCE_CTRL_UP) y -= 4;
+  if (pad.buttons & SCE_CTRL_DOWN) y += 4;
+  if (x < 0) x = 0;
+  if (y < 0) y = 0;
+  if (x > kWidth - 1) x = kWidth - 1;
+  if (y > kHeight - 1) y = kHeight - 1;
+  const bool moved = x != g_cursor_x || y != g_cursor_y;
+  g_cursor_x = x;
+  g_cursor_y = y;
+  g_cursor_px.store(static_cast<int>(x), std::memory_order_relaxed);
+  g_cursor_py.store(static_cast<int>(y), std::memory_order_relaxed);
+
+  const bool cross = (pad.buttons & SCE_CTRL_CROSS) != 0;
+  if (!added) {
+    SendMouse(engine, kAdd, 1, x, y, 0);
+    added = true;
+  }
+  if (cross && !pressed) {
+    SendMouse(engine, kDown, 1, x, y, kFlutterPointerButtonMousePrimary);
+    pressed = true;
+  } else if (cross && pressed) {
+    if (moved) SendMouse(engine, kMove, 1, x, y, kFlutterPointerButtonMousePrimary);
+  } else if (!cross && pressed) {
+    SendMouse(engine, kUp, 1, x, y, 0);
+    pressed = false;
+  } else if (moved) {
+    SendMouse(engine, kHover, 1, x, y, 0);
+  }
+  // The sprite is blended into presented frames only, so an idle screen needs
+  // a frame for the arrow to move on it.
+  if (moved) g_hud_frame_wanted = true;
+}
+
+// --- the rear panel as a trackpad ----------------------------------------
+//
+// `rearTouch: scroll`. A finger moving on the back scrolls what is under the
+// anchor: the cursor when it is up, else the last front touch, else the
+// centre. The content follows the finger (natural direction), which is what
+// every laptop trackpad does since 2011.
+bool g_rear_scroll = false;
+struct {
+  bool inited = false;
+  bool down = false;
+  double x = 0, y = 0;
+  int min_x = 0, min_y = 0;
+  double scale_x = 0.5, scale_y = 0.5;
+} g_rear;
+
+void InitRear() {
+  sceTouchSetSamplingState(SCE_TOUCH_PORT_BACK, SCE_TOUCH_SAMPLING_STATE_START);
+  SceTouchPanelInfo info = {};
+  if (sceTouchGetPanelInfo(SCE_TOUCH_PORT_BACK, &info) >= 0) {
+    const int span_x = info.maxAaX - info.minAaX;
+    const int span_y = info.maxAaY - info.minAaY;
+    if (span_x > 0 && span_y > 0) {
+      g_rear.min_x = info.minAaX;
+      g_rear.min_y = info.minAaY;
+      g_rear.scale_x = static_cast<double>(kWidth) / span_x;
+      g_rear.scale_y = static_cast<double>(kHeight) / span_y;
+    }
+  }
+  VLog("flutter-vita: rear panel scale=%.4f,%.4f\n", g_rear.scale_x,
+       g_rear.scale_y);
+  g_rear.inited = true;
+}
+
+void PumpRearTouch(FlutterEngine engine) {
+  if (!g_rear_scroll) return;
+  if (!g_rear.inited) InitRear();
+  SceTouchData data = {};
+  if (sceTouchPeek(SCE_TOUCH_PORT_BACK, &data, 1) < 0) return;
+  const bool down = data.reportNum > 0;
+  if (down) {
+    const double x = (data.report[0].x - g_rear.min_x) * g_rear.scale_x;
+    const double y = (data.report[0].y - g_rear.min_y) * g_rear.scale_y;
+    if (g_rear.down) {
+      const double dx = x - g_rear.x, dy = y - g_rear.y;
+      if (dx != 0 || dy != 0) {
+        double ax = kWidth / 2.0, ay = kHeight / 2.0;
+        if (g_cursor_on.load(std::memory_order_relaxed)) {
+          ax = g_cursor_x;
+          ay = g_cursor_y;
+        } else if (g_last_touch_us != 0) {
+          ax = g_touch.x;
+          ay = g_touch.y;
+        }
+        static bool added = false;
+        if (!added) {
+          SendMouse(engine, kAdd, 2, ax, ay, 0);
+          added = true;
+        }
+        // Twice the finger's travel: the back panel maps onto the screen at
+        // about half scale, so this is one screen pixel per panel pixel.
+        SendMouse(engine, kHover, 2, ax, ay, 0, kFlutterPointerSignalKindScroll,
+                  -dx * 2.0, -dy * 2.0);
+      }
+    }
+    g_rear.x = x;
+    g_rear.y = y;
+  }
+  g_rear.down = down;
+}
+
+// --- the channel -----------------------------------------------------------
+
+// One string value of `key` inside the args object, or "".
+void ConfigString(const char* body, size_t len, const char* key, char* out,
+                  size_t cap) {
+  out[0] = '\0';
+  const char* v = JsonFindValue(body, len, key);
+  if (v != nullptr) JsonUnescape(v, body + len, out, cap);
+}
+
+// Apply every key present in `configure`'s args.
+void ApplyConfig(FlutterEngine engine, const char* body, size_t len) {
+  char str[64];
+  const char* v;
+  if ((v = JsonFindValue(body, len, "debugStrip")) != nullptr) {
+    SetStripMode(std::atoi(v));
+  }
+  if ((v = JsonFindValue(body, len, "keepAwake")) != nullptr) {
+    flutter_vita_keep_awake = std::strncmp(v, "true", 4) == 0 ? 1 : 0;
+  }
+  if ((v = JsonFindValue(body, len, "watchdog")) != nullptr) {
+    g_watchdog_override = std::strncmp(v, "true", 4) == 0 ? 1 : 0;
+  }
+  if ((v = JsonFindValue(body, len, "pixelRatio")) != nullptr) {
+    double ratio = std::atof(v);
+    if (ratio < 0.5) ratio = 0.5;
+    if (ratio > 3.0) ratio = 3.0;
+    if (ratio != g_pixel_ratio) {
+      g_pixel_ratio = ratio;
+      SendWindowMetrics(engine);
+      VLog("flutter-vita: pixel ratio %.2f (%dx%d logical)\n", ratio,
+           static_cast<int>(kWidth / ratio), static_cast<int>(kHeight / ratio));
+    }
+  }
+  ConfigString(body, len, "pad", str, sizeof str);
+  if (str[0] != '\0') {
+    const bool cursor = std::strcmp(str, "cursor") == 0;
+    if (cursor && !g_cursor_on.load()) {
+      g_cursor_x = kWidth / 2.0;
+      g_cursor_y = kHeight / 2.0;
+    }
+    g_cursor_on.store(cursor, std::memory_order_relaxed);
+    g_hud_frame_wanted = true;
+  }
+  ConfigString(body, len, "rearTouch", str, sizeof str);
+  if (str[0] != '\0') g_rear_scroll = std::strcmp(str, "scroll") == 0;
+  ConfigString(body, len, "cpuClock", str, sizeof str);
+  if (str[0] != '\0') SetCpuClock(std::strcmp(str, "high") == 0);
+  ConfigString(body, len, "onExit", str, sizeof str);
+  if (str[0] != '\0') {
+    g_exit_mode = std::strcmp(str, "handoff") == 0 ? kExitHandoff
+                  : std::strcmp(str, "exit") == 0  ? kExitQuit
+                  : std::strcmp(str, "ignore") == 0 ? kExitIgnore
+                                                    : kExitAuto;
+  }
+  ConfigString(body, len, "psButton", str, sizeof str);
+  if (str[0] != '\0') SetPsButtonLocked(std::strcmp(str, "locked") == 0);
+  if ((v = JsonFindValue(body, len, "bounce")) != nullptr && *v == '[') {
+    // A list of channel names. Replaces the previous list.
+    g_bounce_count = 0;
+    const char* end = body + len;
+    const char* p = v + 1;
+    while (p < end && *p != ']' && g_bounce_count < kMaxBounce) {
+      if (*p == '"') {
+        JsonUnescape(p, end, g_bounce[g_bounce_count], sizeof g_bounce[0]);
+        if (g_bounce[g_bounce_count][0] != '\0') g_bounce_count++;
+        p++;
+        while (p < end && *p != '"') p++;
+      }
+      p++;
+    }
+  }
+  VLog("flutter-vita: configured: strip %d awake %d watchdog %d ratio %.2f "
+       "cursor %d rear %d exit %d bounce %d\n",
+       flutter_vita_debug_overlay, flutter_vita_keep_awake, g_watchdog_override,
+       g_pixel_ratio, g_cursor_on.load() ? 1 : 0, g_rear_scroll ? 1 : 0,
+       static_cast<int>(g_exit_mode), g_bounce_count);
+}
+
+// What the app can ask about the console and this build, one JSON object.
+int WriteInfo(char* out, size_t cap) {
+  char title[16] = "";
+  sceAppMgrAppParamGetString(0, 12, title, sizeof title);
+  SceKernelFreeMemorySizeInfo mem;
+  mem.size = sizeof(mem);
+  int free_user_k = -1, free_cdram_k = -1;
+  if (sceKernelGetFreeMemorySize(&mem) >= 0) {
+    free_user_k = mem.size_user / 1024;
+    free_cdram_k = mem.size_cdram / 1024;
+  }
+  return std::snprintf(
+      out, cap,
+      "[{\"titleId\":\"%s\",\"engineRevision\":\"%s\",\"flutterVersion\":\"%s\","
+      "\"embedderVersion\":\"%s\",\"release\":%s,\"backend\":\"%s\","
+      "\"pixelRatio\":%.2f,\"batteryPercent\":%d,\"charging\":%s,"
+      "\"freeMemoryK\":%d,\"freeCdramK\":%d,\"armMhz\":%d,\"gpuMhz\":%d,"
+      "\"debugStrip\":%d,\"cursor\":%s,\"rearTouch\":%s}]",
+      title, FLUTTER_VITA_ENGINE_REVISION, FLUTTER_VITA_FLUTTER_VERSION,
+      FLUTTER_VITA_EMBEDDER_VERSION, flutter_vita_release ? "true" : "false",
+      g_gl_enabled ? flutter_vita_gl_backend() : "software", g_pixel_ratio,
+      scePowerGetBatteryLifePercent(),
+      scePowerIsBatteryCharging() ? "true" : "false", free_user_k, free_cdram_k,
+      scePowerGetArmClockFrequency(), scePowerGetGpuClockFrequency(),
+      flutter_vita_debug_overlay, g_cursor_on.load() ? "true" : "false",
+      g_rear_scroll ? "true" : "false");
+}
+
+void Reply(const FlutterPlatformMessage* message, const char* json) {
+  if (message->response_handle == nullptr || g_engine == nullptr) return;
+  FlutterEngineSendPlatformMessageResponse(
+      g_engine, message->response_handle,
+      reinterpret_cast<const uint8_t*>(json), std::strlen(json));
+}
+
+// vita/config, JSONMethodCodec: configure {..}, info, log {level, message}.
+void HandleConfigChannel(FlutterEngine engine,
+                         const FlutterPlatformMessage* message) {
+  const char* body = reinterpret_cast<const char*>(message->message);
+  const size_t len = message->message_size;
+  char method[32] = {0};
+  const char* m = JsonFindValue(body, len, "method");
+  if (m != nullptr) JsonUnescape(m, body + len, method, sizeof method);
+
+  if (std::strcmp(method, "configure") == 0) {
+    ApplyConfig(engine, body, len);
+    Reply(message, "[true]");
+  } else if (std::strcmp(method, "info") == 0) {
+    char out[768];
+    WriteInfo(out, sizeof out);
+    Reply(message, out);
+  } else if (std::strcmp(method, "log") == 0) {
+    char level[16], text[512];
+    ConfigString(body, len, "level", level, sizeof level);
+    ConfigString(body, len, "message", text, sizeof text);
+    VLog("app: %s%s%s\n", level, level[0] != '\0' ? " " : "", text);
+    Reply(message, "[true]");
+  } else {
+    Reply(message, "[\"unknown\",\"no such method\",null]");
+  }
+}
+
+// flutter/platform, JSONMethodCodec. The framework's own services: what the
+// console can answer is answered, what it cannot is a success that does
+// nothing, and the rest stays the empty reply the framework tolerates.
+bool HandlePlatformChannel(const FlutterPlatformMessage* message) {
+  const char* body = reinterpret_cast<const char*>(message->message);
+  const size_t len = message->message_size;
+  char method[64] = {0};
+  const char* m = JsonFindValue(body, len, "method");
+  if (m != nullptr) JsonUnescape(m, body + len, method, sizeof method);
+
+  if (std::strcmp(method, "Clipboard.setData") == 0) {
+    char text[4096] = {0};
+    const char* t = JsonFindValue(body, len, "text");
+    if (t != nullptr) JsonUnescape(t, body + len, text, sizeof text);
+    g_clipboard = text;
+    Reply(message, "[null]");
+    return true;
+  }
+  if (std::strcmp(method, "Clipboard.getData") == 0) {
+    if (g_clipboard.empty()) {
+      Reply(message, "[null]");
+      return true;
+    }
+    std::string out = "[{\"text\":\"";
+    std::vector<char> escaped(g_clipboard.size() * 6 + 1);
+    JsonEscape(g_clipboard.c_str(), escaped.data(), escaped.size());
+    out += escaped.data();
+    out += "\"}]";
+    Reply(message, out.c_str());
+    return true;
+  }
+  if (std::strcmp(method, "Clipboard.hasStrings") == 0) {
+    Reply(message, g_clipboard.empty() ? "[{\"value\":false}]"
+                                       : "[{\"value\":true}]");
+    return true;
+  }
+  if (std::strcmp(method, "SystemNavigator.pop") == 0) {
+    Reply(message, "[null]");
+    RequestExit();
+    return true;
+  }
+  if (std::strcmp(method, "System.exitApplication") == 0) {
+    Reply(message, "[{\"response\":\"exit\"}]");
+    RequestExit();
+    return true;
+  }
+  if (std::strncmp(method, "SystemChrome.", 13) == 0 ||
+      std::strncmp(method, "HapticFeedback.", 15) == 0 ||
+      std::strncmp(method, "SystemSound.", 12) == 0) {
+    // A landscape console with no motor: the request is honoured by doing
+    // nothing, which is what the app expects on a platform without the
+    // feature, rather than the MissingPluginException an empty reply is.
+    Reply(message, "[null]");
+    return true;
+  }
+  return false;
+}
+
 // The UI-thread heartbeat, and the watchdog behind it.
 //
 // A frozen screen has two different causes that look the same from outside:
@@ -3516,6 +4075,7 @@ void SendHeartbeat(uint64_t now) {
 
 // The build's switch, then the card's. Read once, logged once.
 bool WatchdogArmed() {
+  if (g_watchdog_override >= 0) return g_watchdog_override == 1;
   static int armed = -1;
   if (armed >= 0) return armed == 1;
   armed = flutter_vita_watchdog != 0 ? 1 : 0;
@@ -3977,9 +4537,13 @@ void OnPlatformMessage(const FlutterPlatformMessage* message,
   // The stats channel is polled once a second by any app with the HUD strip;
   // a log line per poll would be most of the log. The plugins' channels
   // (vita/sensors, vita/camera) poll faster still: their first ten
-  // messages are logged, then one in a hundred.
-  const bool is_stats = message->channel != nullptr &&
-                        std::strcmp(message->channel, "vita/stats") == 0;
+  // messages are logged, then one in a hundred. The mouse cursor channel
+  // fires on every hover change in cursor mode (click, basic, click, ...)
+  // and says nothing this port acts on.
+  const bool is_stats =
+      message->channel != nullptr &&
+      (std::strcmp(message->channel, "vita/stats") == 0 ||
+       std::strcmp(message->channel, "flutter/mousecursor") == 0);
   bool quiet = is_stats;
   if (!quiet && message->channel != nullptr &&
       std::strncmp(message->channel, "vita/", 5) == 0 &&
@@ -4004,6 +4568,21 @@ void OnPlatformMessage(const FlutterPlatformMessage* message,
          message->channel != nullptr ? message->channel : "(null)",
          static_cast<unsigned>(message->message_size), preview,
          message->message_size > n ? "..." : "");
+  }
+
+  // A channel the app answers in Dart goes up before anything here looks
+  // at it.
+  if (IsBounced(message->channel) && BounceToDart(message)) return;
+
+  if (message->channel != nullptr &&
+      std::strcmp(message->channel, "vita/config") == 0) {
+    HandleConfigChannel(g_engine, message);
+    return;
+  }
+  if (message->channel != nullptr &&
+      std::strcmp(message->channel, "flutter/platform") == 0 &&
+      HandlePlatformChannel(message)) {
+    return;
   }
 
   if (is_stats) {
@@ -4471,7 +5050,9 @@ void PumpIme(FlutterEngine engine) {
 
 int main(int argc, char** argv) {
   OpenLog();
-  VLog("flutter-vita: starting\n");
+  VLog("flutter-vita: starting (embedder %s%s)\n", FLUTTER_VITA_EMBEDDER_VERSION,
+       flutter_vita_release ? ", release" : "");
+  if (flutter_vita_release) flutter_vita_debug_overlay = 0;
 
   // Watch every thread this process ever starts, before it starts any.
   //
@@ -4851,6 +5432,8 @@ int main(int argc, char** argv) {
     DrainPlatformTasks(engine);
     g_loop_task_us += sceKernelGetSystemTimeWide() - task_start;
     PumpTouch(engine);
+    PumpPad(engine);
+    PumpRearTouch(engine);
     DrainInjectedTaps(engine);
     DrainInjectedDrag(engine);
     // The strip on an idle screen: nothing presents, so nothing would
