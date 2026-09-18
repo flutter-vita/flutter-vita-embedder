@@ -727,7 +727,7 @@ static int supervisor_enabled(void) {
 
 // --- mDNS ---------------------------------------------------------------
 //
-// Answers `flutter-vita.local` so nothing has to know the console's address.
+// Answers `fluttervita.local` so nothing has to know the console's address.
 //
 // The address is not stable: the Vita drops Wi-Fi and comes back on whatever
 // DHCP gives it, and every tool here took an IP. Every session began by finding
@@ -757,11 +757,14 @@ static int supervisor_enabled(void) {
 
 // The names this console answers to, each with `.local` appended on the wire.
 //
-// `flutter-vita` is what the tools default to. `flutter.vita` is here because
-// it is the obvious thing to type, and a bare `flutter.vita` cannot be made to
-// work: mDNS answers for `.local` and nothing else, so a name ending in `.vita`
-// goes to the unicast resolver, which has never heard of this console.
-static const char* const kMdnsNames[] = {"flutter-vita", "flutter.vita"};
+// `fluttervita` is what the tools default to (since 2026-09-18; it was
+// `flutter-vita`, kept as an alias for anything that still says so).
+// `flutter.vita` is here because it is the obvious thing to type, and a bare
+// `flutter.vita` cannot be made to work: mDNS answers for `.local` and
+// nothing else, so a name ending in `.vita` goes to the unicast resolver,
+// which has never heard of this console.
+static const char* const kMdnsNames[] = {"fluttervita", "flutter-vita",
+                                         "flutter.vita"};
 #define MDNS_NAME_COUNT ((int)(sizeof kMdnsNames / sizeof kMdnsNames[0]))
 
 static int g_mdns_sock = -1;
