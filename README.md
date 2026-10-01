@@ -17,7 +17,7 @@ two stubs in their place.
 | `src/vita_embedder.cc` | The embedder: engine start-up against the linked-in snapshot, the GL and software present paths, vsync, touch and pad input, the on-screen keyboard, lifecycle, platform channels, the `FRAMES`/`JANK` log lines, the watchdog, the debug strip, the cursor and the `vita/config` channel. |
 | `src/embedder_version.h` | `FLUTTER_VITA_EMBEDDER_VERSION`. The first log line and `FlutterVita.info()` report it. |
 | `src/vita_hud_font.h` | The strip's font: Roboto Mono at 10 px and 12 px, as bitmaps. Generated. Do not edit. |
-| `src/devserver.c`, `include/devserver.h` | The on-device dev server: the TCP port an app opens in a debug build, for install, launch, logs, screenshots, taps and the handoff to the receiver. |
+| `src/devserver.c`, `include/devserver.h` | The on-device dev server: the TCP port an app opens in a debug build, for install, launch, logs, screenshots, taps and the handoff to the bridge. |
 | `include/flutter_vita_gl.h` | The eight functions the embedder needs from the GL the app links. The tool's `gl_gles2.c` supplies them over `fvita_gles2`. |
 | `CMakeLists.txt` | An OBJECT library. The app build adds it with `add_subdirectory()`. |
 | `tools/gen_hud_font.py` | Regenerates `src/vita_hud_font.h` from `tools/fonts/RobotoMono-Regular.ttf`. |
@@ -78,7 +78,7 @@ definition:
 | --- | --- |
 | `vita/config` | `configure {…}`, `info`, `log`. The `flutter_vita` package's channel: the strip mode, keep-awake, the watchdog, the pixel ratio, the pad as a cursor, rear-panel scroll, the clocks, what exit does, the PS button lock, and `bounce`, a list of channels to send up to Dart. |
 | `vita/bounce` | A channel in the bounce list goes to Dart as `[name length][name][message]`. The Dart reply goes back to the original response handle. |
-| `flutter/platform` | `Clipboard.*` in process. `SystemNavigator.pop` and `System.exitApplication`: handoff to the receiver in a debug build, process exit in a release build. `SystemChrome.*`, `HapticFeedback.*`, `SystemSound.*`: a success that does nothing. |
+| `flutter/platform` | `Clipboard.*` in process. `SystemNavigator.pop` and `System.exitApplication`: handoff to the bridge in a debug build, process exit in a release build. `SystemChrome.*`, `HapticFeedback.*`, `SystemSound.*`: a success that does nothing. |
 | `vita/stats` | The strip's numbers, for `vita_debug_strip`. |
 | `flutter/textinput` | The console's on-screen keyboard. |
 | Other channels | `flutter_vita_channel_call` (the app's plugins), else an empty reply. |

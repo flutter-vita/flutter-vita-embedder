@@ -50,7 +50,7 @@ void dev_server_set_overlay_handler(void (*overlay)(int on)) {
   g_overlay = overlay;
 }
 
-// See devserver.h: the receiver (ADR-0016) links this same server and needs a
+// See devserver.h: the bridge (ADR-0016) links this same server and needs a
 // different port, three commands of its own, and a smaller surface.
 static int g_port = DEVSERVER_PORT;
 static int (*g_extra)(int, const char*, int*) = NULL;
@@ -110,7 +110,7 @@ void dev_server_set_framebuffer_source(
 }
 
 // Defined next to the supervisor switch, used by `handoff` well above it.
-static int read_receiver_titleid(char* out, int max);
+static int read_bridge_titleid(char* out, int max);
 
 static void logf_(const char* fmt, ...) {
   if (g_log == NULL) return;
@@ -235,14 +235,14 @@ static void cmd_log(int sock, const char* log_path) {
 }
 
 // `ls <path>` and `rm <path>`, in the shared server rather than only in the
-// receiver's extras.
+// bridge's extras.
 //
 // An app can write any title but its own -- ux0:app/<self> is the read-only
 // app0: mount, and everything else is ordinary storage. That asymmetry is what
-// makes a receiver possible, and it runs both ways: FVTA00002 can write
-// ux0:app/FVTA00004, the directory the receiver itself gets EACCES on.
+// makes a bridge possible, and it runs both ways: FVTA00002 can write
+// ux0:app/FVTA00004, the directory the bridge itself gets EACCES on.
 //
-// So any running app can update the receiver, with no scePromoterUtil, which
+// So any running app can update the bridge, with no scePromoterUtil, which
 // refuses to load on this console anyway (MODULEMGR_NO_LIB, 0x8002D003). What
 // was missing was not permission: an app could write a file into another title
 // and then neither see it nor take it back.
@@ -284,17 +284,17 @@ static void cmd_rm(int sock, const char* path) {
   send_str(sock, m);
 }
 
-// Give the console to `receiver` and end this process. Never returns.
+// Give the console to `bridge` and end this process. Never returns.
 //
 // Split out of the `handoff` verb so a run nobody is watching can do the same.
 // A benchmark started from the TESTS tab used to end with the app sitting on
-// its results and the receiver gone.
-static void hand_over_to(const char* receiver) {
-  logf_("  [dev] handing off to %s\n", receiver);
+// its results and the bridge gone.
+static void hand_over_to(const char* bridge) {
+  logf_("  [dev] handing off to %s\n", bridge);
   release_gpu();
   sceKernelDelayThread(200 * 1000);
   char uri[64];
-  snprintf(uri, sizeof uri, "psgm:play?titleid=%s", receiver);
+  snprintf(uri, sizeof uri, "psgm:play?titleid=%s", bridge);
   sceAppMgrLaunchAppByUri(0xFFFFF, uri);
   // Exit immediately. Lingering here is what produced the "close the current
   // application?" prompt: the shell only asks because we are still running.
@@ -328,14 +328,14 @@ static int handoff_thread(SceSize args, void* argp) {
     for (int i = 0; i < n; i++) {
       if (buf[i] <= ' ') { buf[i] = '\0'; break; }
     }
-    char receiver[16];
+    char bridge[16];
     if (buf[0] != '\0') {
-      snprintf(receiver, sizeof receiver, "%s", buf);
-    } else if (!read_receiver_titleid(receiver, sizeof receiver)) {
-      snprintf(receiver, sizeof receiver, "%s", DEVSERVER_DEFAULT_LOADER);
+      snprintf(bridge, sizeof bridge, "%s", buf);
+    } else if (!read_bridge_titleid(bridge, sizeof bridge)) {
+      snprintf(bridge, sizeof bridge, "%s", DEVSERVER_DEFAULT_LOADER);
     }
     logf_("  [dev] handoff requested by the app\n");
-    hand_over_to(receiver);
+    hand_over_to(bridge);
   }
   return 0;
 }
@@ -372,16 +372,16 @@ static int serve(int sock, const char* log_path, const char* eboot_path) {
     // -- see dev_server_set_minimal. Spelled out here rather than deleted from
     // the dispatch below, because both products link the same file.
     //
-    // tap and swipe are on the list because the receiver's screen became a
+    // tap and swipe are on the list because the bridge's screen became a
     // screen you press (ADR-0016). A deploy tool that can read the panel with
     // `shot` but cannot reach the CRASHES tab can only verify the first thing
     // the panel draws.
     //
-    // Not in the receiver yet: it links the pinned copy of this file, so
+    // Not in the bridge yet: it links the pinned copy of this file, so
     // minimal mode gains tap at the next pin. ADR-0016 decision 2.
     //
-    // overlay, since 2026-09-16: the receiver's HUD starts hidden and the
-    // host wants it in a screenshot of the receiver as much as the pad does.
+    // overlay, since 2026-09-16: the bridge's HUD starts hidden and the
+    // host wants it in a screenshot of the bridge as much as the pad does.
     if (g_minimal && strcmp(line, "ping") != 0 && strcmp(line, "probe") != 0 &&
         strcmp(line, "log") != 0 && strncmp(line, "get ", 4) != 0 &&
         strncmp(line, "put ", 4) != 0 && strcmp(line, "shot") != 0 &&
@@ -478,7 +478,7 @@ static int serve(int sock, const char* log_path, const char* eboot_path) {
       return 0;
     } else if (strncmp(line, "put ", 4) == 0) {
       // put <size> <path>. M1 is an UNSAFE self too, so it can write ux0:app --
-      // which is how a new *receiver* gets installed. Each app can now replace
+      // which is how a new *bridge* gets installed. Each app can now replace
       // the other, and no FTP server is involved in either direction.
       char* sp = strchr(line + 4, ' ');
       if (sp == NULL) { send_str(sock, "ERR put <size> <path>\n"); return 0; }
@@ -520,10 +520,10 @@ static int serve(int sock, const char* log_path, const char* eboot_path) {
       // `bail` takes the clean route; `abort` goes through libc's abort(), the
       // symbol the app overrides, so it also proves the override is linked.
       // Both look identical from here: the socket closes, no dialog appears,
-      // and the receiver answers within a few seconds.
+      // and the bridge answers within a few seconds.
       //
       // A recovery mechanism nobody can trigger is one nobody knows is broken.
-      send_str(sock, "OK bailing to the receiver\n");
+      send_str(sock, "OK bailing to the bridge\n");
       sceNetSocketClose(sock);
       logf_("  [dev] bail requested\n");
       // Not before abort(): a deliberate abort is testing the crash path, and
@@ -545,25 +545,26 @@ static int serve(int sock, const char* log_path, const char* eboot_path) {
     } else if (strncmp(line, "handoff", 7) == 0 &&
                (line[7] == '\0' || line[7] == ' ')) {
       // The other half of the loop. We cannot replace our own eboot.bin, and
-      // while we run nobody else can either -- so hand control to the receiver,
+      // while we run nobody else can either -- so hand control to the bridge,
       // which can do both once we are gone, and launches us back afterwards.
       //
-      // Which receiver is not a constant. It used to be FVTA00003 and nothing
+      // Which bridge is not a constant. It used to be FVTA00003 and nothing
       // else, which held right up until that slot was emptied and every handoff
       // launched a title that did not exist. Resolution order: the argument,
-      // then receiver.titleid, then the historical default. The file lets a
-      // console whose receiver has moved be corrected with one `put`.
-      char receiver[16];
+      // then bridge.titleid (or receiver.titleid), then the historical
+      // default. The file lets a console whose bridge has moved be corrected
+      // with one `put`.
+      char bridge[16];
       if (line[7] == ' ' && line[8] != '\0') {
-        snprintf(receiver, sizeof receiver, "%s", line + 8);
-      } else if (!read_receiver_titleid(receiver, sizeof receiver)) {
-        snprintf(receiver, sizeof receiver, "%s", DEVSERVER_DEFAULT_LOADER);
+        snprintf(bridge, sizeof bridge, "%s", line + 8);
+      } else if (!read_bridge_titleid(bridge, sizeof bridge)) {
+        snprintf(bridge, sizeof bridge, "%s", DEVSERVER_DEFAULT_LOADER);
       }
       char msg[64];
-      snprintf(msg, sizeof msg, "OK handing off to %s\n", receiver);
+      snprintf(msg, sizeof msg, "OK handing off to %s\n", bridge);
       send_str(sock, msg);
       sceNetSocketClose(sock);
-      hand_over_to(receiver);
+      hand_over_to(bridge);
     } else if (strcmp(line, "relaunch") == 0) {
       send_str(sock, "OK relaunching\n");
       sceNetSocketClose(sock);
@@ -676,7 +677,7 @@ static int serve(int sock, const char* log_path, const char* eboot_path) {
 //
 // A background process is not the foreground app, so it outlives this one
 // dying. That is what lets a crash be recovered without someone walking to the
-// console and tapping the receiver.
+// console and tapping the bridge.
 //
 // Two things about the argument, both of which cost days. The mode is 0:
 // VitaSDK's header says "must be 1" and defines INVALID_ARG as 0x80106502,
@@ -695,13 +696,21 @@ static int serve(int sock, const char* log_path, const char* eboot_path) {
 
 // Which title `handoff` hands to. One line, no newline needed:
 //
-//   printf 'put 9 ux0:data/flutter-vita/receiver.titleid\nFVTA00004' | nc <ip> 1339
+//   printf 'put 9 ux0:data/flutter-vita/bridge.titleid\nFVTA00004' | nc <ip> 1339
 //
-// Returns 0 when the file is absent or does not hold nine plausible
-// characters.
-static int read_receiver_titleid(char* out, int max) {
-  const SceUID fd =
-      sceIoOpen("ux0:data/flutter-vita/receiver.titleid", SCE_O_RDONLY, 0777);
+// receiver.titleid is read when bridge.titleid is absent: that was its name
+// until 2026-10-01, when the receiver became the bridge.
+//
+// Returns 0 when neither file holds nine plausible characters.
+static int read_titleid_file(const char* path, char* out, int max);
+
+static int read_bridge_titleid(char* out, int max) {
+  return read_titleid_file("ux0:data/flutter-vita/bridge.titleid", out, max) ||
+         read_titleid_file("ux0:data/flutter-vita/receiver.titleid", out, max);
+}
+
+static int read_titleid_file(const char* path, char* out, int max) {
+  const SceUID fd = sceIoOpen(path, SCE_O_RDONLY, 0777);
   if (fd < 0) return 0;
   char buf[16];
   const int n = sceIoRead(fd, buf, sizeof buf - 1);
@@ -769,7 +778,7 @@ static const char* const kMdnsNames[] = {"fluttervita", "flutter-vita",
 
 static int g_mdns_sock = -1;
 
-// What the responder has actually done, written to disk so the receiver's panel
+// What the responder has actually done, written to disk so the bridge's panel
 // can show it. Every mDNS failure here looked identical from the host -- the
 // name stops resolving -- and the four causes need four different fixes.
 #define MDNS_STATUS_PATH "ux0:data/flutter-vita/mdns.txt"
@@ -905,7 +914,7 @@ static int mdns_write_a(unsigned char* out, const char* name, unsigned int addr)
 //
 // Without it a resolver that asks for AAAA first hears nothing and waits its
 // full timeout before it asks for A: macOS waits 5.00 s, on every connect.
-// That was the "cold receiver" in every note before 2026-09-14. The tools
+// That was the "cold bridge" in every note before 2026-09-14. The tools
 // pass -4 to nc now, and this makes any other client fast too: a browser at
 // localsend, curl, a Python script.
 static int mdns_write_nsec(unsigned char* out, const char* name) {
@@ -1152,8 +1161,8 @@ static void start_mdns(void) {
 }
 
 static void start_supervisor(void) {
-  // Never for the receiver. The supervisor's job is to relaunch the receiver when
-  // an app dies; a receiver that starts one is asking to be recovered to itself,
+  // Never for the bridge. The supervisor's job is to relaunch the bridge when
+  // an app dies; a bridge that starts one is asking to be recovered to itself,
   // and the two would contend for the same background title id besides.
   // ADR-0016 decision 8.
   if (g_minimal) return;
@@ -1230,7 +1239,7 @@ int dev_server_run(void (*log_line)(const char* msg),
 
   SceCtrlData pad;
   sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
-  // L + R + START, held for a second, hands the console to the receiver.
+  // L + R + START, held for a second, hands the console to the bridge.
   //
   // Until 2026-09-16 a plain START here closed the listening socket and
   // ended this thread: the m1 experiment's way out, kept by accident in
@@ -1272,20 +1281,20 @@ int dev_server_run(void (*log_line)(const char* msg),
     sceCtrlPeekBufferPositive(0, &pad, 1);
     if ((pad.buttons & chord) == chord) {
       if (++held_ticks >= 33) {  // a second of 30 ms ticks
-        char receiver[16], self[16] = "";
-        if (!read_receiver_titleid(receiver, sizeof receiver)) {
-          snprintf(receiver, sizeof receiver, "%s", DEVSERVER_DEFAULT_LOADER);
+        char bridge[16], self[16] = "";
+        if (!read_bridge_titleid(bridge, sizeof bridge)) {
+          snprintf(bridge, sizeof bridge, "%s", DEVSERVER_DEFAULT_LOADER);
         }
-        // Never to ourselves: the receiver runs this loop too, and a launch
+        // Never to ourselves: the bridge runs this loop too, and a launch
         // of the title that is still running drops the console to LiveArea.
         sceAppMgrAppParamGetString(0, 12, self, sizeof self);
-        if (strcmp(self, receiver) == 0) {
-          logf_("  [dev] L+R+START held, but this is the receiver\n");
+        if (strcmp(self, bridge) == 0) {
+          logf_("  [dev] L+R+START held, but this is the bridge\n");
           held_ticks = -100;  // three seconds before it can fire again
         } else {
           logf_("  [dev] L+R+START held, handing off\n");
           sceNetSocketClose(srv);
-          hand_over_to(receiver);
+          hand_over_to(bridge);
         }
       }
     } else {

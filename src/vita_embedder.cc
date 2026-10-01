@@ -170,7 +170,7 @@ __attribute__((weak)) int flutter_vita_watchdog = 1;
 }
 
 // Whether a build wants the debug HUD: 1 shows it from the first frame, 2
-// builds it in but leaves it hidden until L+R+SELECT (the receiver, whose
+// builds it in but leaves it hidden until L+R+SELECT (the bridge, whose
 // screen is the tool), 0 never draws it.
 //
 // Weak, so an app that ships can define its own strong `flutter_vita_debug_overlay = 0`
@@ -1236,7 +1236,7 @@ constexpr int kHudPad = 8;      // the strip's side margins
 constexpr int kHudGap = 16;     // between columns
 constexpr int kHudLabelAdvance = kHudLabelFontW + 1;  // labels are letter-spaced
 constexpr int kHudValueAdvance = kHudValueFontW;
-constexpr uint32_t kHudBack = 0xFF1B120Eu;   // A8B8G8R8: #0E121B, the receiver's panel
+constexpr uint32_t kHudBack = 0xFF1B120Eu;   // A8B8G8R8: #0E121B, the bridge's panel
 constexpr uint32_t kHudLabel = 0xFFA5938Bu;  // #8B93A5
 constexpr uint32_t kHudValue = 0xFFEFE9E6u;  // #E6E9EF
 constexpr uint32_t kHudDim = 0xFF78645Cu;    // #5C6478, the second line at the left
@@ -3515,7 +3515,7 @@ void SendTextInputMethod(const char* json) {
 // ===========================================================================
 
 // Where the app goes when it asks to leave (SystemNavigator.pop, or
-// System.exitApplication). Auto: the receiver in a debug build, the LiveArea
+// System.exitApplication). Auto: the bridge in a debug build, the LiveArea
 // in a release one.
 enum ExitMode { kExitAuto, kExitHandoff, kExitQuit, kExitIgnore };
 ExitMode g_exit_mode = kExitAuto;
@@ -3532,12 +3532,12 @@ void RequestExit() {
   }
   if (mode == kExitHandoff && !flutter_vita_release) {
     // The dev server's watcher (devserver.c) picks the file up within half a
-    // second, releases the GPU and hands the console to the receiver.
+    // second, releases the GPU and hands the console to the bridge.
     const SceUID fd = sceIoOpen("ux0:data/flutter-vita/handoff.request",
                                 SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
     if (fd >= 0) {
       sceIoClose(fd);
-      VLog("flutter-vita: exit asked, handing off to the receiver\n");
+      VLog("flutter-vita: exit asked, handing off to the bridge\n");
       return;
     }
     VLog("flutter-vita: handoff request failed (0x%08X), leaving instead\n",
@@ -4645,7 +4645,7 @@ void OnPlatformMessage(const FlutterPlatformMessage* message,
     //
     // On 3.73 both the SceAppMgrUser wrapper and the syscall under it answer
     // 0x8080201C to this process (gallery builds 41 and 42, launched from
-    // the receiver and from the home screen alike), so the totals fall back
+    // the bridge and from the home screen alike), so the totals fall back
     // to the standard application budget: 256 MiB of main memory, 112 MiB
     // of CDRAM, 26 MiB physically contiguous. The 26 is what
     // sceKernelGetFreeMemorySize reports before anything is allocated; the

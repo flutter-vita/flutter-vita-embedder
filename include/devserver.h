@@ -8,8 +8,9 @@
 
 #define DEVSERVER_PORT 1339
 
-// Default handoff target. Overridden by ux0:data/flutter-vita/receiver.titleid
-// or by `handoff <titleid>`, so reinstalling the receiver needs no rebuild.
+// Default handoff target. Overridden by ux0:data/flutter-vita/bridge.titleid
+// (receiver.titleid before 2026-10-01, still read)
+// or by `handoff <titleid>`, so reinstalling the bridge needs no rebuild.
 #define DEVSERVER_DEFAULT_LOADER "FVTA00001"
 
 // Serves until `exit` arrives or START is pressed. Returns 0 on exit, negative
@@ -53,7 +54,7 @@ void dev_server_set_overlay_handler(void (*overlay)(int on));
 
 // --- Extension points, for a product that embeds this server -------------
 //
-// The receiver (ADR-0016) links this server rather than copying it. It needs a
+// The bridge (ADR-0016) links this server rather than copying it. It needs a
 // different port, three commands of its own, and a smaller surface. All three
 // are registered from a constructor, which runs before dev_server_run.
 
@@ -81,7 +82,7 @@ void dev_server_log(const char* msg);
 void dev_server_set_ready_handler(void (*ready)(void));
 
 // Serve only ping, probe, log, get, put, plus whatever the command handler
-// adds. ADR-0016 decision 9: the receiver recovers from crashes, so it carries
+// adds. ADR-0016 decision 9: the bridge recovers from crashes, so it carries
 // no handoff, no relaunch, no deliberate fault, and no crash supervisor.
 void dev_server_set_minimal(int minimal);
 
