@@ -2,7 +2,7 @@
 //
 // The engine draws through a GLES2 it resolves by name. What owns the GXM
 // context, the display chain and the swap is fvita_gles2, built from the
-// tool's engine/gles2 into every app (ADR-0019; vitaGL was the other answer
+// tool's gles2/ into every app (ADR-0019; vitaGL was the other answer
 // until 2026-09-14). The embedder calls these eight and nothing else of it;
 // the tool's templates/vita-app/gl_gles2.c answers.
 #ifndef FLUTTER_VITA_EMBEDDER_GL_H_

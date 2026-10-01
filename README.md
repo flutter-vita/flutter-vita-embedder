@@ -39,7 +39,7 @@ target_link_libraries(app flutter_vita_embedder
 
 The tool's [`templates/vita-app/CMakeLists.txt`](https://github.com/flutter-vita/flutter-vita/blob/master/templates/vita-app/CMakeLists.txt)
 is the reference. The tool carries this repository as a git submodule at
-`engine/embedder`.
+`embedder/`.
 
 From the artifact's `include/` the embedder uses `embedder.h` (the Flutter
 embedder API), `embedder_software_frame_damage.h` (the port's

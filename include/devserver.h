@@ -1,6 +1,7 @@
 // On-device development server: the edit -> deploy -> run loop without taiHEN.
 //
-// vitacompanion hangs SceShell on this device (experiments/vita-tooling), so the
+// vitacompanion hangs SceShell on this device (the tool's experiments/vita-tooling,
+// in its git history at c91294a), so the
 // listener lives inside our own app. It exists only while the app runs.
 #ifndef DEVSERVER_H
 #define DEVSERVER_H
