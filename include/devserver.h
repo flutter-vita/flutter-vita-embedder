@@ -9,7 +9,6 @@
 #define DEVSERVER_PORT 1339
 
 // Default handoff target. Overridden by ux0:data/flutter-vita/bridge.titleid
-// (receiver.titleid before 2026-10-01, still read)
 // or by `handoff <titleid>`, so reinstalling the bridge needs no rebuild.
 #define DEVSERVER_DEFAULT_LOADER "FVTA00001"
 

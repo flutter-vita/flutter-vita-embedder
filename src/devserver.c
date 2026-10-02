@@ -551,9 +551,8 @@ static int serve(int sock, const char* log_path, const char* eboot_path) {
       // Which bridge is not a constant. It used to be FVTA00003 and nothing
       // else, which held right up until that slot was emptied and every handoff
       // launched a title that did not exist. Resolution order: the argument,
-      // then bridge.titleid (or receiver.titleid), then the historical
-      // default. The file lets a console whose bridge has moved be corrected
-      // with one `put`.
+      // then bridge.titleid, then the historical default. The file lets a
+      // console whose bridge has moved be corrected with one `put`.
       char bridge[16];
       if (line[7] == ' ' && line[8] != '\0') {
         snprintf(bridge, sizeof bridge, "%s", line + 8);
@@ -698,19 +697,11 @@ static int serve(int sock, const char* log_path, const char* eboot_path) {
 //
 //   printf 'put 9 ux0:data/flutter-vita/bridge.titleid\nFVTA00004' | nc <ip> 1339
 //
-// receiver.titleid is read when bridge.titleid is absent: that was its name
-// until 2026-10-01, when the receiver became the bridge.
-//
-// Returns 0 when neither file holds nine plausible characters.
-static int read_titleid_file(const char* path, char* out, int max);
-
+// Returns 0 when the file is absent or does not hold nine plausible
+// characters.
 static int read_bridge_titleid(char* out, int max) {
-  return read_titleid_file("ux0:data/flutter-vita/bridge.titleid", out, max) ||
-         read_titleid_file("ux0:data/flutter-vita/receiver.titleid", out, max);
-}
-
-static int read_titleid_file(const char* path, char* out, int max) {
-  const SceUID fd = sceIoOpen(path, SCE_O_RDONLY, 0777);
+  const SceUID fd =
+      sceIoOpen("ux0:data/flutter-vita/bridge.titleid", SCE_O_RDONLY, 0777);
   if (fd < 0) return 0;
   char buf[16];
   const int n = sceIoRead(fd, buf, sizeof buf - 1);
