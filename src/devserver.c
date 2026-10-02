@@ -977,7 +977,9 @@ static int mdns_respond_type(const char* name, int negative_aaaa) {
 
 static int mdns_respond(const char* name) { return mdns_respond_type(name, 0); }
 
-// Join the group again against whatever interface we are on now.
+static int mdns_open(void);
+
+// A new socket against whatever interface we are on now.
 //
 // IP_ADD_MEMBERSHIP with INADDR_ANY picks an interface once, at the moment it
 // is called. When the console drops Wi-Fi and comes back, the membership is
@@ -986,17 +988,14 @@ static int mdns_respond(const char* name) { return mdns_respond_type(name, 0); }
 // only when a heartbeat happens to be fresh, and not at all in the gaps -- and
 // on macOS a failed lookup is cached, so one missed heartbeat is a drop that
 // lasts longer than the outage did.
-static void mdns_rejoin(void) {
-  if (g_mdns_sock < 0) return;
-  SceNetIpMreq mreq;
-  memset(&mreq, 0, sizeof mreq);
-  sceNetInetPton(SCE_NET_AF_INET, MDNS_GROUP, &mreq.imr_multiaddr);
-  mreq.imr_interface.s_addr = sceNetHtonl(SCE_NET_INADDR_ANY);
-  sceNetSetsockopt(g_mdns_sock, SCE_NET_IPPROTO_IP, SCE_NET_IP_DROP_MEMBERSHIP,
-                   &mreq, sizeof mreq);
-  g_mdns_joined = sceNetSetsockopt(g_mdns_sock, SCE_NET_IPPROTO_IP,
-                                   SCE_NET_IP_ADD_MEMBERSHIP, &mreq,
-                                   sizeof mreq) >= 0;
+//
+// A new socket, not only a new membership on the old one: on 2026-10-02 the
+// bridge stayed open through a Wi-Fi drop and came back with nothing on the
+// network at all, no TCP and no mDNS answer, until it was restarted.
+static void mdns_reopen(void) {
+  if (g_mdns_sock >= 0) sceNetSocketClose(g_mdns_sock);
+  g_mdns_joined = 0;
+  g_mdns_sock = mdns_open();
 }
 
 // One round of announcements, on every name.
@@ -1004,6 +1003,34 @@ static void mdns_announce_all(void) {
   for (int n = 0; n < MDNS_NAME_COUNT; n++) {
     g_mdns_announced += mdns_respond(kMdnsNames[n]);
   }
+}
+
+// The dev server's listening socket, non-blocking. Returns -1 when the network
+// will not have it yet.
+//
+// Non-blocking accept so the pad stays responsive: the chord in the server
+// loop must keep working even when the network is down, which on this device
+// it regularly is.
+static int open_listener(void) {
+  const int srv = sceNetSocket("fvita-dev", SCE_NET_AF_INET,
+                               SCE_NET_SOCK_STREAM, 0);
+  if (srv < 0) return -1;
+  int one = 1;
+  sceNetSetsockopt(srv, SCE_NET_SOL_SOCKET, SCE_NET_SO_REUSEADDR, &one,
+                   sizeof one);
+
+  SceNetSockaddrIn addr;
+  memset(&addr, 0, sizeof addr);
+  addr.sin_family = SCE_NET_AF_INET;
+  addr.sin_addr.s_addr = sceNetHtonl(SCE_NET_INADDR_ANY);
+  addr.sin_port = sceNetHtons(g_port);
+  if (sceNetBind(srv, (SceNetSockaddr*)&addr, sizeof addr) < 0 ||
+      sceNetListen(srv, 2) < 0) {
+    sceNetSocketClose(srv);
+    return -1;
+  }
+  sceNetSetsockopt(srv, SCE_NET_SOL_SOCKET, SCE_NET_SO_NBIO, &one, sizeof one);
+  return srv;
 }
 
 static int mdns_thread(SceSize args, void* argp) {
@@ -1040,7 +1067,7 @@ static int mdns_thread(SceSize args, void* argp) {
     if (addr != 0 && addr != g_mdns_addr) {
       g_mdns_addr = addr;
       g_mdns_rejoins++;
-      mdns_rejoin();
+      mdns_reopen();
       // The same burst as startup, because that is what this is.
       mdns_announce_all();
       sceKernelDelayThread(1000 * 1000);
@@ -1099,37 +1126,36 @@ static int mdns_thread(SceSize args, void* argp) {
   return 0;
 }
 
-// Best effort throughout: a console that cannot join the group still serves
-// every tool that knows its address, so nothing here is fatal.
-static void start_mdns(void) {
-  g_mdns_sock = sceNetSocket("fvita-mdns", SCE_NET_AF_INET,
-                             SCE_NET_SOCK_DGRAM, 0);
-  if (g_mdns_sock < 0) {
-    logf_("  [dev] mdns socket failed: 0x%08X\n", (unsigned)g_mdns_sock);
-    return;
+// The responder's socket: bound to 5353, in the group, with a receive
+// timeout. Returns -1 when the network will not have it.
+static int mdns_open(void) {
+  const int sock = sceNetSocket("fvita-mdns", SCE_NET_AF_INET,
+                                SCE_NET_SOCK_DGRAM, 0);
+  if (sock < 0) {
+    logf_("  [dev] mdns socket failed: 0x%08X\n", (unsigned)sock);
+    return -1;
   }
   int one = 1;
-  sceNetSetsockopt(g_mdns_sock, SCE_NET_SOL_SOCKET, SCE_NET_SO_REUSEADDR,
-                   &one, sizeof one);
+  sceNetSetsockopt(sock, SCE_NET_SOL_SOCKET, SCE_NET_SO_REUSEADDR, &one,
+                   sizeof one);
 
   SceNetSockaddrIn addr;
   memset(&addr, 0, sizeof addr);
   addr.sin_family = SCE_NET_AF_INET;
   addr.sin_addr.s_addr = sceNetHtonl(SCE_NET_INADDR_ANY);
   addr.sin_port = sceNetHtons(MDNS_PORT);
-  if (sceNetBind(g_mdns_sock, (SceNetSockaddr*)&addr, sizeof addr) < 0) {
+  if (sceNetBind(sock, (SceNetSockaddr*)&addr, sizeof addr) < 0) {
     logf_("  [dev] mdns bind failed; name will not resolve\n");
-    sceNetSocketClose(g_mdns_sock);
-    g_mdns_sock = -1;
-    return;
+    sceNetSocketClose(sock);
+    return -1;
   }
 
   SceNetIpMreq mreq;
   memset(&mreq, 0, sizeof mreq);
   sceNetInetPton(SCE_NET_AF_INET, MDNS_GROUP, &mreq.imr_multiaddr);
   mreq.imr_interface.s_addr = sceNetHtonl(SCE_NET_INADDR_ANY);
-  if (sceNetSetsockopt(g_mdns_sock, SCE_NET_IPPROTO_IP,
-                       SCE_NET_IP_ADD_MEMBERSHIP, &mreq, sizeof mreq) < 0) {
+  if (sceNetSetsockopt(sock, SCE_NET_IPPROTO_IP, SCE_NET_IP_ADD_MEMBERSHIP,
+                       &mreq, sizeof mreq) < 0) {
     logf_("  [dev] mdns could not join %s; queries will not reach us\n",
           MDNS_GROUP);
   } else {
@@ -1140,8 +1166,16 @@ static void start_mdns(void) {
   // between packets, and a blocking wait keeps it off the CPU. One second so
   // it still notices the socket going away.
   int usec = 1000 * 1000;
-  sceNetSetsockopt(g_mdns_sock, SCE_NET_SOL_SOCKET, SCE_NET_SO_RCVTIMEO,
-                   &usec, sizeof usec);
+  sceNetSetsockopt(sock, SCE_NET_SOL_SOCKET, SCE_NET_SO_RCVTIMEO, &usec,
+                   sizeof usec);
+  return sock;
+}
+
+// Best effort throughout: a console that cannot join the group still serves
+// every tool that knows its address, so nothing here is fatal.
+static void start_mdns(void) {
+  g_mdns_sock = mdns_open();
+  if (g_mdns_sock < 0) return;
 
   const SceUID th = sceKernelCreateThread("fvita-mdns", mdns_thread, 0x60,
                                           0x2000, 0, 0, NULL);
@@ -1205,32 +1239,16 @@ int dev_server_run(void (*log_line)(const char* msg),
     logf_("  [dev] listening on port %d (no IP yet)\n", g_port);
   }
 
-  const int srv = sceNetSocket("fvita-dev", SCE_NET_AF_INET,
-                               SCE_NET_SOCK_STREAM, 0);
+  int srv = open_listener();
   if (srv < 0) {
-    logf_("  [dev] socket failed: 0x%08X\n", (unsigned)srv);
-    return -1;
-  }
-  int one = 1;
-  sceNetSetsockopt(srv, SCE_NET_SOL_SOCKET, SCE_NET_SO_REUSEADDR, &one,
-                   sizeof one);
-
-  SceNetSockaddrIn addr;
-  memset(&addr, 0, sizeof addr);
-  addr.sin_family = SCE_NET_AF_INET;
-  addr.sin_addr.s_addr = sceNetHtonl(SCE_NET_INADDR_ANY);
-  addr.sin_port = sceNetHtons(g_port);
-  if (sceNetBind(srv, (SceNetSockaddr*)&addr, sizeof addr) < 0 ||
-      sceNetListen(srv, 2) < 0) {
     logf_("  [dev] bind/listen on %d failed\n", g_port);
-    sceNetSocketClose(srv);
     return -1;
   }
-
-  // Non-blocking accept so the pad stays responsive: the chord below must
-  // keep working even when the network is down, which on this device it
-  // regularly is.
-  sceNetSetsockopt(srv, SCE_NET_SOL_SOCKET, SCE_NET_SO_NBIO, &one, sizeof one);
+  // Ticks until the next attempt to listen again, and whether this outage has
+  // had its log line. One line when the socket goes and one when it is back,
+  // not one a second while the Wi-Fi is off.
+  int relisten_ticks = 0;
+  int relisten_logged = 0;
 
   SceCtrlData pad;
   sceCtrlSetSamplingMode(SCE_CTRL_MODE_ANALOG);
@@ -1257,7 +1275,7 @@ int dev_server_run(void (*log_line)(const char* msg),
   if (g_ready != NULL) g_ready();
 
   for (;;) {
-    const int c = sceNetAccept(srv, NULL, NULL);
+    const int c = srv >= 0 ? sceNetAccept(srv, NULL, NULL) : -1;
     if (c >= 0) {
       // Blocking for the conversation itself; a half-sent upload should wait,
       // not spin.
@@ -1271,6 +1289,29 @@ int dev_server_run(void (*log_line)(const char* msg),
         return 0;
       }
       continue;
+    }
+
+    // EAGAIN is "nobody yet". Anything else and the socket is gone, which is
+    // what a Wi-Fi drop looked like on 2026-10-02: the bridge stayed open, its
+    // screen showed an address, and the host's connects timed out until it
+    // was restarted. A new socket once a second until the network takes it.
+    if (srv >= 0 && c != (int)SCE_NET_ERROR_EAGAIN &&
+        c != (int)SCE_NET_ERROR_EINTR) {
+      if (!relisten_logged) {
+        logf_("  [dev] accept failed 0x%08X; listening again\n", (unsigned)c);
+        relisten_logged = 1;
+      }
+      sceNetSocketClose(srv);
+      srv = -1;
+      relisten_ticks = 0;
+    }
+    if (srv < 0 && ++relisten_ticks >= 33) {
+      relisten_ticks = 0;
+      srv = open_listener();
+      if (srv >= 0) {
+        logf_("  [dev] listening again on port %d\n", g_port);
+        relisten_logged = 0;
+      }
     }
 
     sceCtrlPeekBufferPositive(0, &pad, 1);
@@ -1288,7 +1329,7 @@ int dev_server_run(void (*log_line)(const char* msg),
           held_ticks = -100;  // three seconds before it can fire again
         } else {
           logf_("  [dev] L+R+START held, handing off\n");
-          sceNetSocketClose(srv);
+          if (srv >= 0) sceNetSocketClose(srv);
           hand_over_to(bridge);
         }
       }
