@@ -37,7 +37,7 @@ target_link_libraries(app flutter_vita_embedder
   ...)
 ```
 
-The tool's [`templates/vita-app/CMakeLists.txt`](https://github.com/flutter-vita/flutter-vita/blob/master/templates/vita-app/CMakeLists.txt)
+The tool's [`templates/vita-app/CMakeLists.txt`](https://github.com/flutter-vita/flutter-vita/blob/main/templates/vita-app/CMakeLists.txt)
 is the reference. The tool carries this repository as a git submodule at
 `embedder/`.
 
@@ -90,7 +90,7 @@ fps, raster and swap time, GPU busy, the four CPU cores, RAM, CDRAM, the C
 heap and the battery. The CPU composes it into a 960x34 box every 20
 frames. The embedder blends it over the finished frame before the flip: on
 the GL path through `flutter_vita_gl_set_frame_hook`, on the software path
-after the blit. [Debug an app](https://github.com/flutter-vita/flutter-vita/blob/master/docs/debug-app.md)
+after the blit. [Debug an app](https://github.com/flutter-vita/flutter-vita/blob/main/docs/debug-app.md)
 explains each column.
 
 To change its font:
