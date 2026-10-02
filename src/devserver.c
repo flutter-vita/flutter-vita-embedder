@@ -1033,6 +1033,10 @@ static int mdns_thread(SceSize args, void* argp) {
     // out; there is no notification, and by the time the heartbeat noticed,
     // the host had already cached the failure.
     const unsigned int addr = mdns_self_addr();
+    // Zero while the Wi-Fi is down. Forgetting the address then is what makes
+    // the return a change: the router usually hands back the same lease, and
+    // compared with the old address that read as no change and never rejoined.
+    if (addr == 0) g_mdns_addr = 0;
     if (addr != 0 && addr != g_mdns_addr) {
       g_mdns_addr = addr;
       g_mdns_rejoins++;
