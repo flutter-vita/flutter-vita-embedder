@@ -3174,14 +3174,18 @@ extern "C" void flutter_vita_gpu_shutdown(void) {
 }
 
 // The AOT snapshot, linked into eboot.bin rather than loaded. gen_snapshot
-// emits these four symbols into the assembly file that is assembled alongside
+// emits these two symbols into the assembly file that is assembled alongside
 // this translation unit; see ADR-0005 for why the alternative -- an ELF loaded
 // at runtime -- was abandoned.
+//
+// Since Dart 3.13 (Flutter 3.47) one snapshot serves both the VM and the
+// isolate, so the VM and isolate arguments below get the same two symbols. The
+// engine's own runtime/dart_snapshot.cc does the same. Until 3.44 there were
+// four: _kDartVmSnapshot{Data,Instructions} and
+// _kDartIsolateSnapshot{Data,Instructions}.
 extern "C" {
-extern const uint8_t _kDartVmSnapshotData[];
-extern const uint8_t _kDartVmSnapshotInstructions[];
-extern const uint8_t _kDartIsolateSnapshotData[];
-extern const uint8_t _kDartIsolateSnapshotInstructions[];
+extern const uint8_t _kDartSnapshotData[];
+extern const uint8_t _kDartSnapshotText[];
 }
 
 // m3 shipped without a log channel, which is why the first crash had to be
@@ -5283,10 +5287,10 @@ int main(int argc, char** argv) {
   // app0: is the read-only mount of the installed .vpk.
   args.assets_path = "app0:/flutter_assets";
   args.icu_data_path = "app0:/icudtl.dat";
-  args.vm_snapshot_data = _kDartVmSnapshotData;
-  args.vm_snapshot_instructions = _kDartVmSnapshotInstructions;
-  args.isolate_snapshot_data = _kDartIsolateSnapshotData;
-  args.isolate_snapshot_instructions = _kDartIsolateSnapshotInstructions;
+  args.vm_snapshot_data = _kDartSnapshotData;
+  args.vm_snapshot_instructions = _kDartSnapshotText;
+  args.isolate_snapshot_data = _kDartSnapshotData;
+  args.isolate_snapshot_instructions = _kDartSnapshotText;
 
 
   FlutterEngine engine = nullptr;
