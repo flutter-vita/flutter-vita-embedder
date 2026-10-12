@@ -273,6 +273,23 @@ static void cmd_ls(int sock, const char* path) {
   send_str(sock, m);
 }
 
+// One file's size, for the host to check a `get` against: tools/pull.sh asks
+// for it first, and pulls again when the copy is shorter. The same answer as
+// the bridge's own stat: "<bytes> file|dir", or "ERR stat 0x...".
+static void cmd_stat(int sock, const char* path) {
+  char m[96];
+  SceIoStat st;
+  memset(&st, 0, sizeof st);
+  const int r = sceIoGetstat(path, &st);
+  if (r < 0) {
+    snprintf(m, sizeof m, "ERR stat 0x%08X\n", (unsigned)r);
+  } else {
+    snprintf(m, sizeof m, "%lld %s\n", (long long)st.st_size,
+             SCE_S_ISDIR(st.st_mode) ? "dir" : "file");
+  }
+  send_str(sock, m);
+}
+
 static void cmd_rm(int sock, const char* path) {
   char m[192];
   const int r = sceIoRemove(path);
@@ -384,11 +401,12 @@ static int serve(int sock, const char* log_path, const char* eboot_path) {
     // host wants it in a screenshot of the bridge as much as the pad does.
     if (g_minimal && strcmp(line, "ping") != 0 && strcmp(line, "probe") != 0 &&
         strcmp(line, "log") != 0 && strncmp(line, "get ", 4) != 0 &&
+        strncmp(line, "stat ", 5) != 0 &&
         strncmp(line, "put ", 4) != 0 && strcmp(line, "shot") != 0 &&
         strncmp(line, "tap ", 4) != 0 && strncmp(line, "swipe ", 6) != 0 &&
         strcmp(line, "diag") != 0 && strcmp(line, "shotinfo") != 0 &&
         strncmp(line, "overlay ", 8) != 0) {
-      send_str(sock, "ERR not served here (ping|probe|log|get|put|shot"
+      send_str(sock, "ERR not served here (ping|probe|log|get|stat|put|shot"
                      "|shotinfo|tap|swipe|diag|overlay|ls|stage|install"
                      "|launch|promote)\n");
       continue;
@@ -413,6 +431,8 @@ static int serve(int sock, const char* log_path, const char* eboot_path) {
       return 0;
     } else if (strncmp(line, "ls ", 3) == 0) {
       cmd_ls(sock, line + 3);
+    } else if (strncmp(line, "stat ", 5) == 0) {
+      cmd_stat(sock, line + 5);
     } else if (strncmp(line, "rm ", 3) == 0) {
       cmd_rm(sock, line + 3);
     } else if (strcmp(line, "log") == 0) {
@@ -439,17 +459,26 @@ static int serve(int sock, const char* log_path, const char* eboot_path) {
         send_str(sock, m);
         return 0;
       }
+      // A failed send ends the transfer. Until 2026-10-12 it only ended that
+      // block, and the next one went out: a Wi-Fi drop gave the host a file
+      // with a hole in it and a normal close. Now a copy can only be short,
+      // and `stat` gives the host the size to compare it with.
       static char gbuf[32 * 1024];
       int gn;
-      while ((gn = sceIoRead(gf, gbuf, sizeof gbuf)) > 0) {
+      int failed = 0;
+      while (!failed && (gn = sceIoRead(gf, gbuf, sizeof gbuf)) > 0) {
         int off = 0;
         while (off < gn) {
           const int w = sceNetSend(sock, gbuf + off, gn - off, 0);
-          if (w <= 0) break;
+          if (w <= 0) {
+            failed = 1;
+            break;
+          }
           off += w;
         }
       }
       sceIoClose(gf);
+      if (failed) logf_("  [dev] get %s: a send failed; stopped there\n", line + 4);
       return 0;  // close so the reader sees EOF
     } else if (strcmp(line, "probe") == 0) {
       // ux0:app/<self> may be read-only from inside the app's own sandbox, or
@@ -665,7 +694,7 @@ static int serve(int sock, const char* log_path, const char* eboot_path) {
       *(volatile unsigned int*)0 = 0xDEAD;
       return 1;  // not reached
     } else if (n > 0) {
-    send_str(sock, "ERR unknown (ping|probe|diag|log|get|put|ls|rm|shot|shotinfo|"
+    send_str(sock, "ERR unknown (ping|probe|diag|log|get|stat|put|ls|rm|shot|shotinfo|"
                                     "tap <x> <y>|overlay on|off|handoff [titleid]|relaunch|"
                                     "crash|exit)\n");
     }
