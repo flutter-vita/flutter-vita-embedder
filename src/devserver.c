@@ -1236,6 +1236,30 @@ static void start_supervisor(void) {
   logf_("  [dev] supervisor start 0x%08X\n", (unsigned)r);
 }
 
+// The host is whoever talks to this server. Its address goes to the card when
+// it changes, for code on the console that has to connect back to the host:
+// the gallery's network probes reach tools/benchserver.py at it. Learned from
+// the connection, never typed: until 2026-10-12 the probes read an address
+// written by hand, and after a Wi-Fi change every network probe timed out
+// against the old one.
+#define HOST_ADDR_PATH "ux0:data/flutter-vita/host.addr"
+
+static void note_host(const SceNetSockaddrIn* peer) {
+  static unsigned int last = 0;
+  const unsigned int a = peer->sin_addr.s_addr;
+  if (a == 0 || a == last) return;
+  char ip[16];
+  if (sceNetInetNtop(SCE_NET_AF_INET, &peer->sin_addr, ip, sizeof ip) == NULL) return;
+  if (strncmp(ip, "127.", 4) == 0) return;  // the console talking to itself
+  last = a;
+  const SceUID f =
+      sceIoOpen(HOST_ADDR_PATH, SCE_O_WRONLY | SCE_O_CREAT | SCE_O_TRUNC, 0777);
+  if (f < 0) return;
+  sceIoWrite(f, ip, strlen(ip));
+  sceIoClose(f);
+  logf_("  [dev] host is %s\n", ip);
+}
+
 int dev_server_run(void (*log_line)(const char* msg),
                    const char* log_path,
                    const char* eboot_path) {
@@ -1304,8 +1328,13 @@ int dev_server_run(void (*log_line)(const char* msg),
   if (g_ready != NULL) g_ready();
 
   for (;;) {
-    const int c = srv >= 0 ? sceNetAccept(srv, NULL, NULL) : -1;
+    SceNetSockaddrIn peer;
+    unsigned int peer_len = sizeof peer;
+    memset(&peer, 0, sizeof peer);
+    const int c =
+        srv >= 0 ? sceNetAccept(srv, (SceNetSockaddr*)&peer, &peer_len) : -1;
     if (c >= 0) {
+      note_host(&peer);
       // Blocking for the conversation itself; a half-sent upload should wait,
       // not spin.
       int zero = 0;
