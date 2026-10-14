@@ -108,6 +108,7 @@ Flutter. A new Flutter gets a new prefix. The suffix does not restart.
 
 ## Licence
 
-BSD 3-Clause, see [LICENSE](LICENSE). Roboto Mono is under the SIL Open Font
+zlib, see [LICENSE](LICENSE). A `.vpk` that contains this code does not
+have to carry the notice. Roboto Mono is under the SIL Open Font
 License 1.1 ([tools/fonts/OFL.txt](tools/fonts/OFL.txt)). Only its bitmaps
 reach an app.
