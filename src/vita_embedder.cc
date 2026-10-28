@@ -170,8 +170,9 @@ __attribute__((weak)) int flutter_vita_watchdog = 1;
 }
 
 // Whether a build wants the debug HUD: 1 shows it from the first frame, 2
-// builds it in but leaves it hidden until L+R+SELECT (the bridge, whose
-// screen is the tool), 0 never draws it.
+// builds it in but leaves it hidden until L+R+SELECT, 0 never draws it.
+// 2 is the default since 2026-10-28: an app is what the developer wants to
+// see on the screen, and the strip covered its top 34 px until the chord.
 //
 // Weak, so an app that ships can define its own strong `flutter_vita_debug_overlay = 0`
 // in the same file where it stubs out the dev server, and the two dev-only
@@ -179,7 +180,7 @@ __attribute__((weak)) int flutter_vita_watchdog = 1;
 // a const at namespace scope has internal linkage in C++, which is the one
 // thing a symbol meant to be overridden must not have.
 extern "C" {
-__attribute__((weak)) int flutter_vita_debug_overlay = 1;
+__attribute__((weak)) int flutter_vita_debug_overlay = 2;
 }
 
 // 1 in a release build (templates/vita-app/release.c defines it beside the

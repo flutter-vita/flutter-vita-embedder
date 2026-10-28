@@ -67,7 +67,7 @@ definition:
 | Integer | Default | Meaning |
 | --- | --- | --- |
 | `flutter_vita_release` | 0 | 1 in a release build: the strip is off and `SystemNavigator.pop()` leaves the app. The tool's `release.c` sets it. |
-| `flutter_vita_debug_overlay` | 1 | 1 shows the strip from the first frame, 2 keeps it hidden until L+R+SELECT, 0 never draws it. The `flutter_vita` package sets 2. |
+| `flutter_vita_debug_overlay` | 2 | 2 keeps the strip hidden until L+R+SELECT, 1 shows it from the first frame, 0 never draws it. The default was 1 until 2026-10-28. |
 | `flutter_vita_watchdog` | 1 | The stall watchdog. |
 | `flutter_vita_force_software` | 0 | The software present path instead of GL. |
 | `flutter_vita_keep_awake` | 1 | No screen dimmer and no sleep while the app runs. |
@@ -85,7 +85,8 @@ definition:
 
 ## The debug strip
 
-Each debug build draws a strip of live numbers over the top of the frame:
+Each debug build can draw a strip of live numbers over the top of the frame.
+It is hidden at the start; L+R+SELECT shows it. It shows
 fps, raster and swap time, GPU busy, the four CPU cores, RAM, CDRAM, the C
 heap and the battery. The CPU composes it into a 960x34 box every 20
 frames. The embedder blends it over the finished frame before the flip: on
