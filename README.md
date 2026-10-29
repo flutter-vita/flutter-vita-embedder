@@ -14,7 +14,7 @@ two stubs in their place.
 
 | Path | What it is |
 | --- | --- |
-| `src/vita_embedder.cc` | The embedder: engine start-up against the linked-in snapshot, the GL and software present paths, vsync, touch and pad input, the on-screen keyboard, lifecycle, platform channels, the `FRAMES`/`JANK` log lines, the watchdog, the debug strip, the cursor and the `vita/config` channel. |
+| `src/vita_embedder.cc` | The embedder: engine start-up against the linked-in snapshot, the GL and software present paths, vsync, touch and pad input, the on-screen keyboard, lifecycle, platform channels, the `FRAMES`/`JANK` log lines, the watchdog, the debug strip, the splash, the cursor and the `vita/config` channel. |
 | `src/embedder_version.h` | `FLUTTER_VITA_EMBEDDER_VERSION`. The first log line and `FlutterVita.info()` report it. |
 | `src/vita_hud_font.h` | The strip's font: Roboto Mono at 10 px and 12 px, as bitmaps. Generated. Do not edit. |
 | `src/devserver.c`, `include/devserver.h` | The on-device dev server: the TCP port an app opens in a debug build, for install, launch, logs, screenshots, taps and the handoff to the bridge. |
@@ -100,6 +100,19 @@ To change its font:
 pip install pillow
 python3 tools/gen_hud_font.py --preview strip.png
 ```
+
+## The splash
+
+The first thing `main()` does is read `app0:splash.bin` and put it on the
+screen, in about 30 ms. It stays there until the first frame. The software
+path takes its memory over as the framebuffer, so the first frame draws over
+it. The GL path frees it when the layer has put a buffer of its own on the
+screen. An app with no file starts on a black screen.
+
+The file is the 960x544 screen in its own pixel format, packed as runs.
+flutter-vita's `tools/splash-pack.dart` writes it from a PNG, and `ShowSplash`
+in `src/vita_embedder.cc` has the format. [Release an app](https://github.com/flutter-vita/flutter-vita/blob/master/docs/release-app.md#4-the-splash)
+tells how to choose the picture.
 
 ## Versions
 

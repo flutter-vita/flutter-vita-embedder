@@ -937,11 +937,179 @@ void StartDevServer() {
   sceKernelStartThread(thread, 0, nullptr);
 }
 
+// The splash: a picture on the panel from the first lines of main() to the
+// first frame.
+//
+// Without it the panel stays black for the whole start. Measured on
+// 2026-10-29: 1.6 s for localsend and 2.3 s for the gallery from main() to the
+// first present, all of it the engine starting and Dart building its first
+// frame. Nothing can draw before main(); until then the panel is the
+// system's.
+//
+// The build packs the app's picture (vita.splash in pubspec.yaml, else the
+// template's) into app0:splash.bin, already at the panel's size and pixel
+// format: nothing on the console decodes a PNG before the engine is up. An app
+// built with `splash: none` has no file and starts on a black panel, as every
+// app did before.
+//
+// The software path takes the block over as its framebuffer (InitDisplay), so
+// the first frame paints over the picture in place. The GL path draws into the
+// layer's own chain: the block stays on the panel until the layer's display
+// callback sets its first buffer, and ReleaseSplashIfReplaced frees it once
+// the display has moved on.
+struct Splash {
+  SceUID memblock = -1;
+  void* base = nullptr;
+};
+Splash g_splash;
+
+// "FVSPLSH1", the width and height as u16, the payload size as u32, all
+// little-endian, then runs over 32-bit A8B8G8R8 pixels: a control byte c below
+// 128 is followed by c + 1 literal pixels, one of 128 or more by one pixel
+// that repeats c - 126 times. tools/splash-pack.dart writes it.
+constexpr char kSplashMagic[8] = {'F', 'V', 'S', 'P', 'L', 'S', 'H', '1'};
+constexpr size_t kSplashHeader = 16;
+constexpr size_t kSplashMaxFile = 4 * 1024 * 1024;  // the raw panel is 2 MB
+static_assert(kPitch == kWidth, "the splash unpacks as one contiguous run");
+
+bool UnpackSplash(const uint8_t* in, size_t in_size, uint32_t* out,
+                  size_t out_pixels) {
+  size_t i = 0;
+  size_t o = 0;
+  while (i < in_size && o < out_pixels) {
+    const unsigned c = in[i++];
+    if (c < 128) {
+      const size_t n = c + 1;
+      if (i + n * 4 > in_size || o + n > out_pixels) return false;
+      std::memcpy(out + o, in + i, n * 4);
+      i += n * 4;
+      o += n;
+    } else {
+      const size_t n = c - 126;
+      if (i + 4 > in_size || o + n > out_pixels) return false;
+      uint32_t pixel;
+      std::memcpy(&pixel, in + i, 4);
+      i += 4;
+      for (size_t k = 0; k < n; k++) out[o + k] = pixel;
+      o += n;
+    }
+  }
+  return i == in_size && o == out_pixels;
+}
+
+void ShowSplash() {
+  const uint64_t t0 = sceKernelGetSystemTimeWide();
+  const SceUID fd = sceIoOpen("app0:splash.bin", SCE_O_RDONLY, 0);
+  if (fd < 0) return;  // built with `splash: none`
+  const SceOff size = sceIoLseek(fd, 0, SCE_SEEK_END);
+  sceIoLseek(fd, 0, SCE_SEEK_SET);
+  if (size < static_cast<SceOff>(kSplashHeader) ||
+      size > static_cast<SceOff>(kSplashMaxFile)) {
+    sceIoClose(fd);
+    VLog("flutter-vita: splash.bin has a bad size (%lld B)\n",
+         static_cast<long long>(size));
+    return;
+  }
+  uint8_t* file = static_cast<uint8_t*>(std::malloc(static_cast<size_t>(size)));
+  if (file == nullptr) {
+    sceIoClose(fd);
+    return;
+  }
+  size_t got = 0;
+  while (got < static_cast<size_t>(size)) {
+    const int r = sceIoRead(fd, file + got, static_cast<SceSize>(size) - got);
+    if (r <= 0) break;
+    got += static_cast<size_t>(r);
+  }
+  sceIoClose(fd);
+
+  uint16_t width = 0;
+  uint16_t height = 0;
+  uint32_t payload = 0;
+  if (got == static_cast<size_t>(size)) {
+    std::memcpy(&width, file + 8, 2);
+    std::memcpy(&height, file + 10, 2);
+    std::memcpy(&payload, file + 12, 4);
+  }
+  if (got != static_cast<size_t>(size) ||
+      std::memcmp(file, kSplashMagic, sizeof kSplashMagic) != 0 ||
+      width != kWidth || height != kHeight ||
+      payload != got - kSplashHeader) {
+    std::free(file);
+    VLog("flutter-vita: splash.bin is not a %dx%d splash; none shown\n",
+         kWidth, kHeight);
+    return;
+  }
+
+  // The same block InitDisplay would allocate, so the software path can take
+  // it over as it is.
+  const int aligned = (kPitch * kHeight * 4 + 0x3FFFF) & ~0x3FFFF;
+  const SceUID block = sceKernelAllocMemBlock(
+      "flutter_splash", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, aligned, nullptr);
+  void* base = nullptr;
+  if (block < 0 || sceKernelGetMemBlockBase(block, &base) < 0) {
+    if (block >= 0) sceKernelFreeMemBlock(block);
+    std::free(file);
+    VLog("flutter-vita: no CDRAM for the splash (0x%08X)\n",
+         static_cast<unsigned>(block));
+    return;
+  }
+  const bool ok = UnpackSplash(file + kSplashHeader, payload,
+                               static_cast<uint32_t*>(base),
+                               static_cast<size_t>(kPitch) * kHeight);
+  std::free(file);
+  if (!ok) {
+    sceKernelFreeMemBlock(block);
+    VLog("flutter-vita: splash.bin does not unpack; none shown\n");
+    return;
+  }
+
+  SceDisplayFrameBuf fb = {};
+  fb.size = sizeof(fb);
+  fb.base = base;
+  fb.pitch = kPitch;
+  fb.pixelformat = SCE_DISPLAY_PIXELFORMAT_A8B8G8R8;
+  fb.width = kWidth;
+  fb.height = kHeight;
+  if (sceDisplaySetFrameBuf(&fb, SCE_DISPLAY_SETBUF_NEXTFRAME) < 0) {
+    sceKernelFreeMemBlock(block);
+    return;
+  }
+  g_splash.memblock = block;
+  g_splash.base = base;
+  VLog("flutter-vita: splash on, %u KB in %u ms\n",
+       static_cast<unsigned>(got / 1024),
+       static_cast<unsigned>((sceKernelGetSystemTimeWide() - t0) / 1000));
+}
+
+// GL only: frees the splash once the layer's display callback has put a
+// buffer of its own on the panel. Until then the display may still be scanning
+// the block. One syscall per frame, for the first frames only.
+void ReleaseSplashIfReplaced() {
+  if (g_splash.memblock < 0) return;
+  SceDisplayFrameBuf shown = {};
+  shown.size = sizeof(shown);
+  if (sceDisplayGetFrameBuf(&shown, SCE_DISPLAY_SETBUF_IMMEDIATE) < 0) return;
+  if (shown.base == g_splash.base) return;
+  sceKernelFreeMemBlock(g_splash.memblock);
+  g_splash = Splash{};
+  VLog("flutter-vita: splash off\n");
+}
+
 bool InitDisplay() {
   // CDRAM is the fast path for the display controller. The framebuffer must be
   // 256 KiB aligned, which SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW gives.
   const int size = kPitch * kHeight * 4;
   const int aligned = (size + 0x3FFFF) & ~0x3FFFF;
+
+  // The splash is on the panel already, in a block of this size: it becomes
+  // the framebuffer, and the first frame paints over the picture.
+  if (g_splash.memblock >= 0) {
+    g_display.memblock = g_splash.memblock;
+    g_display.base = g_splash.base;
+    g_splash = Splash{};
+    return true;
+  }
 
   g_display.memblock = sceKernelAllocMemBlock(
       "flutter_fb", SCE_KERNEL_MEMBLOCK_TYPE_USER_CDRAM_RW, aligned, nullptr);
@@ -3003,6 +3171,7 @@ bool GlPresent(void* /* user_data */) {
   // content. Only while one is open -- it is a per-frame cost with nothing to
   // show for it otherwise.
   flutter_vita_gl_swap(g_ime.open ? 1 : 0);
+  ReleaseSplashIfReplaced();
   g_gl_present_end_us = sceKernelGetSystemTimeWide();
   g_win_blit_us += g_gl_present_end_us - swap_start;
   g_hud_blit_us += g_gl_present_end_us - swap_start;
@@ -5058,6 +5227,9 @@ int main(int argc, char** argv) {
   VLog("flutter-vita: starting (embedder %s%s)\n", FLUTTER_VITA_EMBEDDER_VERSION,
        flutter_vita_release ? ", release" : "");
   if (flutter_vita_release) flutter_vita_debug_overlay = 0;
+
+  // First, so the picture covers everything else the start does.
+  ShowSplash();
 
   // Watch every thread this process ever starts, before it starts any.
   //
