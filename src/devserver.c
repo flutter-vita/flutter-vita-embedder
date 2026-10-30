@@ -1275,9 +1275,12 @@ int dev_server_run(void (*log_line)(const char* msg),
   np.memory = g_net_pool;
   np.size = sizeof g_net_pool;
   np.flags = 0;
-  // Already-initialised is fine; anything else is not.
+  // Already-initialised is fine; anything else is not. main() starts the
+  // stack first (NetUp), so this is EBUSY in every build since 2026-10-30.
+  // The value was 0x80410103 until then, which no run had reached; the
+  // console returns 0x80410110.
   const int ni = sceNetInit(&np);
-  if (ni < 0 && ni != (int)0x80410103 /* SCE_NET_ERROR_EBUSY */) {
+  if (ni < 0 && ni != (int)0x80410110 /* SCE_NET_ERROR_EBUSY */) {
     logf_("  [dev] sceNetInit failed: 0x%08X\n", (unsigned)ni);
     return -1;
   }

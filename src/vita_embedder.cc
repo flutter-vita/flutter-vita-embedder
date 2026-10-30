@@ -51,6 +51,8 @@
 #include <psp2/gxm.h>
 #include <psp2/libime.h>
 #include <psp2/kernel/threadmgr.h>
+#include <psp2/net/net.h>
+#include <psp2/net/netctl.h>
 #include <psp2/sysmodule.h>
 #include <psp2/system_param.h>
 #include <psp2/touch.h>
@@ -935,6 +937,41 @@ void StartDevServer() {
     return;
   }
   sceKernelStartThread(thread, 0, nullptr);
+}
+
+// The network stack, started for Dart before anything can open a socket.
+//
+// dart:io calls SceNet and SceNetCtl directly and starts neither of them.
+// Until 2026-10-30 only the dev server did, so a release build, which links
+// release.c in its place, ran Dart on a stack nobody had started. LocalSend
+// v1.15.4-vita.1 died on its first NetworkInterface.list(): a prefetch abort
+// at PC 0 on the call to sceNetCtlInetGetInfo in SocketBase::ListInterfaces,
+// because SCE_SYSMODULE_NET was never loaded. Every debug run had the dev
+// server's start ahead of it, which hid this.
+//
+// Called before StartDevServer, so both builds start the stack here. The dev
+// server's own start then finds it up (EBUSY) and goes on.
+//
+// The pool is the dev server's size, which every debug run used, transfers
+// included. sceNetInit keeps it for the life of the stack.
+static char g_net_pool[16 * 1024];
+
+void NetUp() {
+  if (sceSysmoduleLoadModule(SCE_SYSMODULE_NET) < 0) {
+    VLog("flutter-vita: SCE_SYSMODULE_NET failed to load; no network\n");
+    return;
+  }
+  SceNetInitParam np;
+  np.memory = g_net_pool;
+  np.size = sizeof g_net_pool;
+  np.flags = 0;
+  const int ni = sceNetInit(&np);
+  if (ni < 0 && ni != static_cast<int>(0x80410110) /* SCE_NET_ERROR_EBUSY */) {
+    VLog("flutter-vita: sceNetInit failed: 0x%08X; no network\n",
+         static_cast<unsigned>(ni));
+    return;
+  }
+  sceNetCtlInit();
 }
 
 // The splash: a picture on the panel from the first lines of main() to the
@@ -5250,6 +5287,10 @@ int main(int argc, char** argv) {
          "only list named threads\n",
          static_cast<unsigned>(watcher));
   }
+
+  // The network first: Dart needs it in both builds, and the dev server finds
+  // it already up.
+  NetUp();
 
   // Before the engine, deliberately. If startup hangs or dies, the dev server
   // is already answering and the log can be pulled without the app exiting.
